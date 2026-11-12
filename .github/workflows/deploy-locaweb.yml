@@ -1,0 +1,95 @@
+name: Publicar ESSENZIA na Locaweb (FTP)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: essenzia-locaweb
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o codigo
+        uses: actions/checkout@v4
+
+      - name: Validar projeto sincronizado com Lovable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f package.json || { echo "::error::Codigo ESSENZIA ainda nao esta no GitHub. Conecte Lovable ao repo antes de publicar."; exit 1; }
+          test -f vite.config.ts || { echo "::error::vite.config.ts ausente."; exit 1; }
+
+      - name: Instalar Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Instalar dependencias
+        run: bun install --frozen-lockfile
+
+      - name: Compilar para /essenzia/
+        env:
+          ESSENZIA_STATIC: "1"
+        run: bun run build
+
+      - name: Validar build estatico e caminhos
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f dist/client/index.html ]; then
+            echo "DEPLOY_DIR=dist/client/" >> "$GITHUB_ENV"
+            INDEX=dist/client/index.html
+          elif [ -f dist/index.html ]; then
+            echo "DEPLOY_DIR=dist/" >> "$GITHUB_ENV"
+            INDEX=dist/index.html
+          else
+            echo "::error::Build sem index.html estatico. Nao sera enviado via FTP."
+            exit 1
+          fi
+          if ! grep -q '/essenzia/' "$INDEX"; then
+            echo "::error::Base /essenzia/ nao encontrada no index.html; deploy interrompido."
+            exit 1
+          fi
+
+      - name: Validar segredos e pasta exclusiva
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_SERVER_DIR: ${{ secrets.FTP_SERVER_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in FTP_SERVER FTP_USERNAME FTP_PASSWORD FTP_SERVER_DIR; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Secret $name ausente."
+              exit 1
+            fi
+          done
+          case "$FTP_SERVER_DIR" in
+            */essenzia/) echo "Pasta /essenzia/ validada." ;;
+            *) echo "::error::FTP_SERVER_DIR deve terminar exatamente com /essenzia/."; exit 1 ;;
+          esac
+
+      - name: Publicar SOMENTE em /essenzia/
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: ${{ env.DEPLOY_DIR }}
+          server-dir: ${{ secrets.FTP_SERVER_DIR }}
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/.env*
+            **/api/**
+            **/.htaccess
